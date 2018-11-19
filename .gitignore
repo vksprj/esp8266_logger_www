@@ -1,3 +1,6 @@
+#passwords
+password.*
+
 # Prerequisites
 *.d
 
