@@ -14,7 +14,22 @@
 ////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////
 
-#include "password.inc"
+//#include "password.inc"
+
+extern const char* _hostname;
+extern const char* _password;
+
+extern const char* wifi_ssid[];
+extern const char* wifi_password[];
+
+/*
+const char* _hostname = "loggerESP";
+const char* _password = "qwerty12345";
+
+#define WIFI_STA_CNT 2
+const char* wifi_ssid[WIFI_STA_CNT] = { "RS39CH", "vks.mktk" };
+const char* wifi_password[WIFI_STA_CNT] = { "RegiOn40", "qqqssscccawds" };
+*/
 
 ////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////
@@ -54,8 +69,9 @@ float ds_t1;
 float ds_t2;
 
 const float DALLAS_TEMPERATURE_ERROR = -300;
-const float ADC_LSB_VBAT = 0.00510908;
 const float RSSI_ERROR = -300;
+const float ADC_LSB_VBAT = 0.00510908;
+const float VBAT_ERROR = -1;
 
 typedef struct
 {
@@ -122,12 +138,20 @@ void setup()
   Serial.begin(115200);
   Serial.setDebugOutput(true);
 
+  Serial.print("\r\nBooting");
+  Serial.print("\r\nSetting WiFi SSIDs & PASSWORDs ...");
+  int i = 0;
+  while ( (wifi_ssid[i] != 0) && (wifi_password[i] != 0) )
+  {
+    wifiMulti.addAP( wifi_ssid[i], wifi_password[i] );
+    i++;
+  }
+  /*
   for (int i = 0; i < WIFI_STA_CNT; i++)
   {
     wifiMulti.addAP( wifi_ssid[i], wifi_password[i] );
   }
-
-  Serial.print("\r\nBooting");
+  */
 
   Serial.printf("\r\nFilesystem initialization... %d", SPIFFS.begin() );
   if (SPIFFS.exists("/.formatted") == 0)
@@ -149,7 +173,7 @@ void setup()
     f.close();
   }
 
-
+  Serial.print("\r\nTime configurating...");
   configTime(TZ_SEC, DST_SEC, "pool.ntp.org", "time.nist.gov");
 
   /*
@@ -259,6 +283,7 @@ void periodic_in_timer()
   second = time_info->tm_sec;
   //
   //
+  set_record_to_default(&record_1s);
   record_1s.uptime = second_counter;
   record_1s.time_unix = time_unix;
   record_1s.rssi = WiFi.RSSI();
@@ -283,9 +308,9 @@ void set_record_to_default(record_t* rec)
   rec->rssi = RSSI_ERROR;
   rec->rssi_min = RSSI_ERROR;
   rec->rssi_max = RSSI_ERROR;
-  rec->vbat = -1;
-  rec->vbat_min = -1;
-  rec->vbat_max = -1;
+  rec->vbat = VBAT_ERROR;
+  rec->vbat_min = VBAT_ERROR;
+  rec->vbat_max = VBAT_ERROR;
   rec->t1 = DALLAS_TEMPERATURE_ERROR;
   rec->t1_min = DALLAS_TEMPERATURE_ERROR;
   rec->t1_max = DALLAS_TEMPERATURE_ERROR;
@@ -315,41 +340,98 @@ void monitorWiFi()
   }
 }
 
-void dallas_temperature_handle()
-{
-  if (dallas_temperature_requested == 0) { return; }
 
-  if (dallas_temperature_requested & 0x01)
-  {
-    if (sensor1.getDeviceCount() > 0)
-    {
-      if (sensor1.isConversionComplete())
-      {
-        dallas_temperature_requested &= ~0x01;
-        ds_t1 = sensor1.getTempCByIndex(0);
-      }
-    }
-    else
-    {
-        dallas_temperature_requested &= ~0x01;
-        ds_t1 = DALLAS_TEMPERATURE_ERROR;
-    }
+////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+
+
+
+
+bool readScratchPadSkipRom(OneWire *_wire, uint8_t* scratchPad)
+{
+  // send the reset command and fail fast
+  int b = _wire->reset();
+  if (b == 0)
+    return false;
+
+  _wire->skip(); // skiprom
+  _wire->write(0xBE); // read scratchpad
+
+  // Read all registers in a simple loop
+  // byte 0: temperature LSB
+  // byte 1: temperature MSB
+  // byte 2: high alarm temp
+  // byte 3: low alarm temp
+  // byte 4: DS18S20: store for crc
+  //         DS18B20 & DS1822: configuration register
+  // byte 5: internal use & crc
+  // byte 6: DS18S20: COUNT_REMAIN
+  //         DS18B20 & DS1822: store for crc
+  // byte 7: DS18S20: COUNT_PER_C
+  //         DS18B20 & DS1822: store for crc
+  // byte 8: SCRATCHPAD_CRC
+  for (uint8_t i = 0; i < 9; i++) {
+    scratchPad[i] = _wire->read();
   }
 
-  if (dallas_temperature_requested & 0x02)
+  b = _wire->reset();
+  return (b == 1);
+}
+
+// reads scratchpad and returns fixed-point temperature, scaling factor 2^-7
+int16_t calculateTemperature(uint8_t* scratchPad)
+{
+
+#define TEMP_LSB        0
+#define TEMP_MSB        1
+#define COUNT_REMAIN    6
+#define COUNT_PER_C     7
+
+  int16_t fpTemperature = (((int16_t) scratchPad[TEMP_MSB]) << 11)
+      | (((int16_t) scratchPad[TEMP_LSB]) << 3);
+
+  fpTemperature = ((fpTemperature & 0xfff0) << 3) - 16
+      + (((scratchPad[COUNT_PER_C] - scratchPad[COUNT_REMAIN]) << 7)
+          / scratchPad[COUNT_PER_C]);
+
+  return fpTemperature;
+}
+
+
+void dallas_temperature_handle()
+{
+  uint8_t ScratchPad[9];
+  if (dallas_temperature_requested == 0) { return; }
+  //
+  //
+  if (dallas_temperature_requested & 0x01)
   {
-    if (sensor2.getDeviceCount() > 0)
+    if (ds1.read_bit() == 1)
     {
-      if (sensor2.isConversionComplete())
+      dallas_temperature_requested &= ~0x01;
+      if (readScratchPadSkipRom(&ds1, ScratchPad))
       {
-        dallas_temperature_requested &= ~0x02;
-        ds_t2 = sensor2.getTempCByIndex(0);
+        ds_t1 = (float) calculateTemperature(ScratchPad) * 0.0078125;
       }
     }
-    else
+  }
+  //
+  //
+  if (dallas_temperature_requested & 0x02)
+  {
+    if (ds2.read_bit() == 1)
     {
-        dallas_temperature_requested &= ~0x02;
-        ds_t2 = DALLAS_TEMPERATURE_ERROR;
+      dallas_temperature_requested &= ~0x02;
+      if (readScratchPadSkipRom(&ds2, ScratchPad))
+      {
+        ds_t2 = (float) calculateTemperature(ScratchPad) * 0.0078125;
+      }
     }
   }
 
@@ -359,12 +441,20 @@ void every_second_handle()
 {
   //
   //
-  sensor1.begin();
-  if (sensor1.getDeviceCount() > 0) { sensor1.requestTemperatures(); }
+
+  //sensor1.begin();
+  ds_t1 = DALLAS_TEMPERATURE_ERROR;
+  sensor1.setWaitForConversion(false);
+  sensor1.requestTemperatures();
+  //if (sensor1.getDeviceCount() > 0) { sensor1.requestTemperatures(); }
   dallas_temperature_requested |= 0x01;
-  sensor2.begin();
-  if (sensor2.getDeviceCount() > 0) { sensor2.requestTemperatures(); }
+  //sensor2.begin();
+  ds_t2 = DALLAS_TEMPERATURE_ERROR;
+  sensor2.setWaitForConversion(false);
+  sensor2.requestTemperatures();
+  //if (sensor2.getDeviceCount() > 0) { sensor2.requestTemperatures(); }
   dallas_temperature_requested |= 0x02;
+
   //
   //  period 1 second
   //
@@ -459,7 +549,6 @@ void every_second_handle()
   //
   //  reset averaging values to default
   //
-  set_record_to_default(&record_1s);
   if ( (second_counter %  10) == 0 ) { set_record_to_default(&record_10s); }
   if ( (second_counter %  60) == 0 ) { set_record_to_default(&record_1m); }
   if ( (second_counter % 600) == 0 ) { set_record_to_default(&record_10m); }
@@ -488,9 +577,21 @@ void average_record(record_t *src, record_t *dst, uint16_t cnt)
   }
   //
   //
-  dst->vbat = (dst->vbat*(cnt-1) + src->vbat) / cnt;
-  if (dst->vbat_min > src->vbat) { dst->vbat_min = src->vbat; }
-  if (dst->vbat_max < src->vbat) { dst->vbat_max = src->vbat; }
+  if (src->vbat != VBAT_ERROR)
+  {
+    if (dst->vbat == VBAT_ERROR)
+    {
+      dst->vbat = src->vbat;
+      dst->vbat_min = src->vbat;
+      dst->vbat_max = src->vbat;
+    }
+    else
+    {
+      dst->vbat = (dst->vbat*(cnt-1) + src->vbat) / cnt;
+      if (dst->vbat_min > src->vbat) { dst->vbat_min = src->vbat; }
+      if (dst->vbat_max < src->vbat) { dst->vbat_max = src->vbat; }
+    }
+  }
   //
   //
   if (src->t1 != DALLAS_TEMPERATURE_ERROR)
@@ -546,6 +647,38 @@ String time_to_string(time_t time)
   return result;
 }
 
+String time_to_date(time_t time)
+{
+  String result;
+  char temps[32];
+  struct tm * info = localtime ( &time );
+
+  sprintf(temps, "%d/%02d/%02d",
+    info->tm_year + 1900,
+    info->tm_mon + 1,
+    info->tm_mday
+    );
+
+  result += temps;
+  return result;
+}
+
+String time_to_time(time_t time)
+{
+  String result;
+  char temps[32];
+  struct tm * info = localtime ( &time );
+
+  sprintf(temps, "%02d:%02d:%02d",
+    info->tm_hour,
+    info->tm_min,
+    info->tm_sec
+    );
+
+  result += temps;
+  return result;
+}
+
 /*
 //////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////
@@ -573,11 +706,31 @@ void WebServer_setup()
   server.on("/records10s", handle_records10s);
   server.on("/records1m", handle_records1m);
   server.on("/records1mf", handle_records1mf);
+  server.on("/records10mf", handle_records10mf);
+  server.on("/records1hf", handle_records1hf);
 
   server.onNotFound(handleNotFound);
 
   server.begin();
   Serial.print("\r\nHTTP server started");
+}
+
+
+void handleNotFound() {
+  //LED_ON
+  String message = "File Not Found\n\n";
+  message += "URI: ";
+  message += server.uri();
+  message += "\nMethod: ";
+  message += (server.method() == HTTP_GET) ? "GET" : "POST";
+  message += "\nArguments: ";
+  message += server.args();
+  message += "\n";
+  for (uint8_t i = 0; i < server.args(); i++) {
+    message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
+  }
+  server.send(404, "text/plain", message);
+  //LED_OFF
 }
 
 void handleRoot()
@@ -595,8 +748,8 @@ void handleRoot()
       msg += F("<title>"); msg += _hostname; msg += F("</title>");
     msg += F("</head>");
 
-    msg += F("<frameset rows="80,*" cols="*">");
-      msg += F("<frame src=\"/menu\" name=\"MENU\" noresize scrolling=\"no\">");
+    msg += F("<frameset rows=\"100,*\" cols=\"*\">");
+      msg += F("<frame src=\"/menu\" name=\"menu\">");
       msg += F("<frame src=\"/content\" name=\"content\">");
     msg += F("</frameset>");
 
@@ -635,16 +788,24 @@ void handle_menu()
 
     message += F("<body>");
       message += F("<p>");
-      message += F("<a href=\"/\">[Главная страница]</a>");
-      message += F("<br><a href=\"/fs\">[FS]</a>&nbsp");
+      message += F("<a href=\"/content\" target=\"content\">[Главная страница]</a>&nbsp");
+      message += F("<a href=\"/fs\" target=\"content\">[FS]</a>&nbsp");
       message += F("<a href=\"/records1s\" target=\"content\">[Память 1сек]</a>&nbsp");
       message += F("<a href=\"/records10s\" target=\"content\">[Память 10сек]</a>&nbsp");
       message += F("<a href=\"/records1m\" target=\"content\">[Память 1мин]</a>&nbsp");
       message += F("<a href=\"/records1mf\" target=\"content\">[Накопитель 1мин]</a>&nbsp");
       message += F("<a href=\"/records10mf\" target=\"content\">[Накопитель 10мин]</a>&nbsp");
+      message += F("<a href=\"/records1hf\" target=\"content\">[Накопитель 1час]</a>&nbsp");
 
-      message += F("<br>Uptime seconds = "); message += second_counter;
-      message += F("<br>Time now [ctime]= "); message += ctime(&time_unix);
+      message += F("<br>Наработано секунд: "); message += record_1s.uptime;
+      message += F(",&nbsp");
+      message += F("Текущая дата и время:"); message += ctime(&time_unix);
+      message += F("<br>Температура 1 = "); message += record_1s.t1;
+      message += F(",&nbsp");
+      message += F("Температура 2 = "); message += record_1s.t2;
+      message += F(",&nbsp");
+      message += F("Напряжение батареи = "); message += record_1s.vbat;
+
     message += F("</body>");
   message += F("</html>");
 
@@ -666,7 +827,7 @@ void handle_menu()
 void handle_content()
 {
   //LED_ON
-  Serial.printf("\r\nvoid handleRoot()");
+  Serial.printf("\r\nvoid handle_content()");
   int time_make = millis();
 
   String message;
@@ -689,6 +850,7 @@ void handle_content()
 
       message += F("<p>Temperature 1 = "); message += ds_t1;
       message += F("<br>Temperature 2 = "); message += ds_t2;
+      message += F("<br>Vbat raw = "); message += analogRead(A0);
 
       message += F("<p>Time now [ctime]= "); message += ctime(&time_unix);
       message += F("<br>Time now [time_t]= "); message += time_unix;
@@ -730,6 +892,53 @@ void handle_content()
     );
 }
 
+
+void handleFS()
+{
+
+  FSInfo fs_info;
+  SPIFFS.info(fs_info);
+
+  String message;
+  message += F("<html>");
+
+    message += F("<head>");
+      message += F("<meta http-equiv='refresh' content='60'/>");
+      message += F("<meta charset=\"utf-8\">");
+      message += F("<title>"); message += _hostname; message += F("</title>");
+    message += F("</head>");
+
+    message += F("<body>");
+      message += F("<br>Текущее время: "); message += time_to_string(time_unix);
+      message += F("<p>FS info");
+      message += F("<br>Всего байт: "); message += fs_info.totalBytes;
+      message += F("<br>Использовано байт: "); message += fs_info.usedBytes;
+      message += F("<br>Размер блока: "); message += fs_info.blockSize;
+      message += F("<br>Размер страницы: "); message += fs_info.pageSize;
+      message += F("<br>Максимально открытых файлов: "); message += fs_info.maxOpenFiles;
+      message += F("<br>Максимально длина пути: "); message += fs_info.maxPathLength;
+
+      message += F("<p>FS formatted = "); message += SPIFFS.exists("/.formatted");
+
+      message += F("<p>List of files:");
+
+      Dir dir = SPIFFS.openDir("/");
+      while (dir.next()) {
+          message += F("<br>&emsp;"); message += dir.fileName();
+          File f = dir.openFile("r");
+          if (f)
+          {
+            message += F("&emsp;"); message += f.size(); message += F(" bytes");
+          }
+      }
+
+    message += F("</body>");
+  message += F("</html>");
+
+  server.send(200, "text/html", message);
+  //LED_OFF
+}
+
 void handle_records1s()
 {
   //LED_ON
@@ -746,19 +955,16 @@ void handle_records1s()
     message += F("</head>");
 
     message += F("<body>");
-      message += F("<br><a href=\"/\">[Главная страница]</a>");
       message += F("<br>Текущее время: "); message += time_to_string(time_unix);
       message += F("<p>");
-      message += F("<b><a href=\"/records1s\">[Записи 1сек]</a></b>&nbsp");
-      message += F("<a href=\"/records10s\">[Записи 10сек]</a>&nbsp");
-      message += F("<a href=\"/records1m\">[Записи 1мин]</a>&nbsp");
 
       message += F("<h1>Записи с периодом 1 секунда</h1>");
 
       message += F("<p>");
 
-
-      message += F("<table width=\"800\" border=\"1px\">");
+      message += F(
+        "<table cellpadding='0' cellspacing='0' width='100%'"
+        " border=1 style='border-collapse:collapse;'>");
       message += F("<caption>");
         message += F("Записи с периодом 1 секунда");
       message += F("</caption>");
@@ -844,19 +1050,17 @@ void handle_records10s()
     message += F("</head>");
 
     message += F("<body>");
-      message += F("<br><a href=\"/\">[Главная страница]</a>");
       message += F("<br>Текущее время: "); message += time_to_string(time_unix);
       message += F("<p>");
-      message += F("<a href=\"/records1s\">[Записи 1сек]</a>&nbsp");
-      message += F("<b><a href=\"/records10s\">[Записи 10сек]</a></b>&nbsp");
-      message += F("<a href=\"/records1m\">[Записи 1мин]</a>&nbsp");
 
       message += F("<h1>Записи с периодом 10 секунд</h1>");
 
       message += F("<p>");
 
 
-      message += F("<table width=\"800\" border=\"1px\">");
+      message += F(
+        "<table cellpadding='0' cellspacing='0' width='100%'"
+        " border=1 style='border-collapse:collapse;'>");
       message += F("<caption>");
         message += F("Записи с периодом 10 секунд");
       message += F("</caption>");
@@ -936,25 +1140,23 @@ void handle_records1m()
   message += F("<html>");
 
     message += F("<head>");
-      message += F("<meta http-equiv='refresh' content='5'/>");
+      message += F("<meta http-equiv='refresh' content='30'/>");
       message += F("<meta charset=\"utf-8\">");
       message += F("<title>"); message += _hostname; message += F("</title>");
     message += F("</head>");
 
     message += F("<body>");
-      message += F("<br><a href=\"/\">[Главная страница]</a>");
       message += F("<br>Текущее время: "); message += time_to_string(time_unix);
       message += F("<p>");
-      message += F("<a href=\"/records1s\">[Записи 1сек]</a>&nbsp");
-      message += F("<a href=\"/records10s\">[Записи 10сек]</a>&nbsp");
-      message += F("<b><a href=\"/records1m\">[Записи 1мин]</a></b>&nbsp");
 
       message += F("<h1>Записи с периодом 1 минута</h1>");
 
       message += F("<p>");
 
 
-      message += F("<table width=\"800\" border=\"1px\">");
+      message += F(
+        "<table cellpadding='0' cellspacing='0' width='100%'"
+        " border=1 style='border-collapse:collapse;'>");
       message += F("<caption>");
         message += F("Записи с периодом 1 минута");
       message += F("</caption>");
@@ -1034,25 +1236,23 @@ void handle_records1mf()
   message += F("<html>");
 
     message += F("<head>");
-      message += F("<meta http-equiv='refresh' content='5'/>");
+      message += F("<meta http-equiv='refresh' content='30'/>");
       message += F("<meta charset=\"utf-8\">");
       message += F("<title>"); message += _hostname; message += F("</title>");
     message += F("</head>");
 
     message += F("<body>");
-      message += F("<br><a href=\"/\">[Главная страница]</a>");
       message += F("<br>Текущее время: "); message += time_to_string(time_unix);
       message += F("<p>");
-      message += F("<a href=\"/records1s\">[Записи 1сек]</a>&nbsp");
-      message += F("<a href=\"/records10s\">[Записи 10сек]</a>&nbsp");
-      message += F("<b><a href=\"/records1m\">[Записи 1мин]</a></b>&nbsp");
 
       message += F("<h1>Записи с периодом 1 минута</h1>");
 
       message += F("<p>");
 
 
-      message += F("<table width=\"800\" border=\"1px\">");
+      message += F(
+        "<table cellpadding='0' cellspacing='0' width='100%'"
+        " border=1 style='border-collapse:collapse;'>");
       message += F("<caption>");
         message += F("Записи с периодом 1 минута");
       message += F("</caption>");
@@ -1135,69 +1335,218 @@ void handle_records1mf()
     );
 }
 
-void handleFS()
-{
 
-  FSInfo fs_info;
-  SPIFFS.info(fs_info);
+void handle_records10mf()
+{
+  //LED_ON
+  Serial.printf("\r\nvoid handle_records10mf()");
+  int time_make = millis();
 
   String message;
   message += F("<html>");
 
     message += F("<head>");
-      message += F("<meta http-equiv='refresh' content='5'/>");
+      message += F("<meta http-equiv='refresh' content='60'/>");
       message += F("<meta charset=\"utf-8\">");
       message += F("<title>"); message += _hostname; message += F("</title>");
     message += F("</head>");
 
     message += F("<body>");
-      message += F("<br><a href=\"/\">[Главная страница]</a>");
       message += F("<br>Текущее время: "); message += time_to_string(time_unix);
-      message += F("<p>FS info");
-      message += F("<br>Всего байт: "); message += fs_info.totalBytes;
-      message += F("<br>Использовано байт: "); message += fs_info.usedBytes;
-      message += F("<br>Размер блока: "); message += fs_info.blockSize;
-      message += F("<br>Размер страницы: "); message += fs_info.pageSize;
-      message += F("<br>Максимально открытых файлов: "); message += fs_info.maxOpenFiles;
-      message += F("<br>Максимально длина пути: "); message += fs_info.maxPathLength;
+      message += F("<p>");
 
-      message += F("<p>FS formatted = "); message += SPIFFS.exists("/.formatted");
+      message += F("<h1>Записи с периодом 10 минут</h1>");
 
-      message += F("<p>List of files:");
+      message += F("<p>");
 
-      Dir dir = SPIFFS.openDir("/");
-      while (dir.next()) {
-          message += F("<br>&emsp;"); message += dir.fileName();
-          File f = dir.openFile("r");
-          if (f)
-          {
-            message += F("&emsp;"); message += f.size(); message += F(" bytes");
-          }
+
+      message += F(
+        "<table cellpadding='0' cellspacing='0' width='100%'"
+        " border=1 style='border-collapse:collapse;'>");
+      message += F("<caption>");
+        message += F("Записи с периодом 10 минут");
+      message += F("</caption>");
+      message += F("<thead>");
+        message += F("<tr>");
+          message += F("<th>Запись №</th>");
+          message += F("<th>Наработка</th>");
+          message += F("<th>Дата и время</th>");
+          message += F("<th>RSSI</th>");
+          message += F("<th>RSSI min</th>");
+          message += F("<th>RSSI max</th>");
+          message += F("<th>Vbat</th>");
+          message += F("<th>Vbat min</th>");
+          message += F("<th>Vbat max</th>");
+          message += F("<th>T1</th>");
+          message += F("<th>T1 min</th>");
+          message += F("<th>T1 max</th>");
+          message += F("<th>T2</th>");
+          message += F("<th>T2 min</th>");
+          message += F("<th>T2 max</th>");
+        message += F("</tr>");
+      message += F("</thead>");
+
+      message += F("<tbody>");
+
+    record_t rec;
+    File f10m = SPIFFS.open(record_10m_filename, "r");
+#define TD(x) { message += F("<td>"); message += (x); message += F("</td>"); }
+    if (f10m)
+    {
+      int32_t pos = f10m.size();
+      int count = 30;
+      pos -= sizeof(rec);
+      while ( (pos >= 0) && (count > 0) )
+      {
+        f10m.seek(pos, SeekSet);
+        f10m.read((uint8_t*)&rec, sizeof(rec));
+        message += F("<tr>");
+          TD(pos / sizeof(rec));
+          TD(rec.uptime);
+          TD( time_to_string(rec.time_unix) );
+          TD(rec.rssi);
+          TD(rec.rssi_min);
+          TD(rec.rssi_max);
+          TD(rec.vbat);
+          TD(rec.vbat_min);
+          TD(rec.vbat_max);
+          TD(rec.t1);
+          TD(rec.t1_min);
+          TD(rec.t1_max);
+          TD(rec.t2);
+          TD(rec.t2_min);
+          TD(rec.t2_max);
+        message += F("</tr>");
+
+        pos -= sizeof(record_t);
+        count--;
       }
+
+      f10m.close();
+    }
+#undef TD
+
+      message += F("</tbody>");
+      message += F("</table>");
 
     message += F("</body>");
   message += F("</html>");
 
+  time_make = millis() - time_make;
+  int time_send = millis();
   server.send(200, "text/html", message);
+  time_send = millis() - time_send;
+
   //LED_OFF
+  Serial.printf("\tmake=% 5dms send=% 5dms, length=% 5d",
+    time_make,
+    time_send,
+    message.length()
+    );
 }
 
-void handleNotFound() {
+
+void handle_records1hf()
+{
   //LED_ON
-  String message = "File Not Found\n\n";
-  message += "URI: ";
-  message += server.uri();
-  message += "\nMethod: ";
-  message += (server.method() == HTTP_GET) ? "GET" : "POST";
-  message += "\nArguments: ";
-  message += server.args();
-  message += "\n";
-  for (uint8_t i = 0; i < server.args(); i++) {
-    message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
-  }
-  server.send(404, "text/plain", message);
+  Serial.printf("\r\nvoid handle_records10mf()");
+  int time_make = millis();
+
+  String message;
+  message += F("<html>");
+
+    message += F("<head>");
+      message += F("<meta http-equiv='refresh' content='600'/>");
+      message += F("<meta charset=\"utf-8\">");
+      message += F("<title>"); message += _hostname; message += F("</title>");
+    message += F("</head>");
+
+    message += F("<body>");
+      message += F("<br>Текущее время: "); message += time_to_string(time_unix);
+      message += F("<p>");
+
+      message += F("<h1>Записи с периодом 1 час</h1>");
+
+      message += F("<p>");
+
+
+      message += F(
+        "<table cellpadding='0' cellspacing='0' width='90%'"
+        " border=1 style='border-collapse:collapse;'"
+		" bordercolor= "
+		">");
+      message += F("<caption>");
+        message += F("Записи с периодом 1 час");
+      message += F("</caption>");
+      message += F("<thead>");
+        message += F("<tr>");
+          message += F("<th>Дата</th>");
+          message += F("<th>Время</th>");
+          message += F("<th>T1</th>");
+          message += F("<th>T2</th>");
+        message += F("</tr>");
+      message += F("</thead>");
+
+      message += F("<tbody>");
+
+    record_t rec;
+    File f10m = SPIFFS.open(record_10m_filename, "r");
+#define TD(x) { message += F("<td>"); message += (x); message += F("</td>"); }
+    if (f10m)
+    {
+      int32_t pos = f10m.size();
+      int count = 6*8;
+      pos -= sizeof(rec);
+      while ( (pos >= 0) && (count > 0) )
+      {
+        f10m.seek(pos, SeekSet);
+        f10m.read((uint8_t*)&rec, sizeof(rec));
+        message += F("<tr align=\"center\">");
+          TD( time_to_date(rec.time_unix) );
+          TD( time_to_time(rec.time_unix) );
+          message += F("<td>");
+			message += rec.t1_min;
+			message += F(" ... ");
+			message += rec.t1;
+			message += F(" ... ");
+			message += rec.t1_max;
+          message += F("</td>");
+          message += F("<td>");
+			message += rec.t2_min;
+			message += F(" ... ");
+			message += rec.t2;
+			message += F(" ... ");
+			message += rec.t2_max;
+          message += F("</td>");
+        message += F("</tr>");
+
+        pos -= sizeof(record_t);
+        count--;
+      }
+
+      f10m.close();
+    }
+#undef TD
+
+      message += F("</tbody>");
+      message += F("</table>");
+
+    message += F("</body>");
+  message += F("</html>");
+
+  time_make = millis() - time_make;
+  int time_send = millis();
+  server.send(200, "text/html", message);
+  time_send = millis() - time_send;
+
   //LED_OFF
+  Serial.printf("\tmake=% 5dms send=% 5dms, length=% 5d",
+    time_make,
+    time_send,
+    message.length()
+    );
 }
+
 
 /*
 //////////////////////////////////////////////////////////
