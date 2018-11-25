@@ -22,15 +22,6 @@ extern const char* _password;
 extern const char* wifi_ssid[];
 extern const char* wifi_password[];
 
-/*
-const char* _hostname = "loggerESP";
-const char* _password = "qwerty12345";
-
-#define WIFI_STA_CNT 2
-const char* wifi_ssid[WIFI_STA_CNT] = { "RS39CH", "vks.mktk" };
-const char* wifi_password[WIFI_STA_CNT] = { "RegiOn40", "qqqssscccawds" };
-*/
-
 ////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////
 
@@ -55,6 +46,10 @@ const char* wifi_password[WIFI_STA_CNT] = { "RegiOn40", "qqqssscccawds" };
 ////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////
 
+void ArduinoOTA_setup();
+
+////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
 
 time_t time_unix;
 struct tm * time_info;
@@ -194,7 +189,6 @@ void setup()
 
   ArduinoOTA_setup();
   WebServer_setup();
-
   Serial.print("\r\nReady");
   Serial.print("\r\nHost OTA="); Serial.print(ArduinoOTA.getHostname());
 
@@ -242,6 +236,7 @@ void loop()
   if (flag_1second != 0)
   {
     flag_1second = 0;
+    dallas_temperature_request();
     every_second_handle();
   }
   dallas_temperature_handle();
@@ -403,6 +398,21 @@ int16_t calculateTemperature(uint8_t* scratchPad)
   return fpTemperature;
 }
 
+void dallas_temperature_request()
+{
+  //sensor1.begin();
+  ds_t1 = DALLAS_TEMPERATURE_ERROR;
+  sensor1.setWaitForConversion(false);
+  sensor1.requestTemperatures();
+  //if (sensor1.getDeviceCount() > 0) { sensor1.requestTemperatures(); }
+  dallas_temperature_requested |= 0x01;
+  //sensor2.begin();
+  ds_t2 = DALLAS_TEMPERATURE_ERROR;
+  sensor2.setWaitForConversion(false);
+  sensor2.requestTemperatures();
+  //if (sensor2.getDeviceCount() > 0) { sensor2.requestTemperatures(); }
+  dallas_temperature_requested |= 0x02;
+}
 
 void dallas_temperature_handle()
 {
@@ -439,22 +449,6 @@ void dallas_temperature_handle()
 
 void every_second_handle()
 {
-  //
-  //
-
-  //sensor1.begin();
-  ds_t1 = DALLAS_TEMPERATURE_ERROR;
-  sensor1.setWaitForConversion(false);
-  sensor1.requestTemperatures();
-  //if (sensor1.getDeviceCount() > 0) { sensor1.requestTemperatures(); }
-  dallas_temperature_requested |= 0x01;
-  //sensor2.begin();
-  ds_t2 = DALLAS_TEMPERATURE_ERROR;
-  sensor2.setWaitForConversion(false);
-  sensor2.requestTemperatures();
-  //if (sensor2.getDeviceCount() > 0) { sensor2.requestTemperatures(); }
-  dallas_temperature_requested |= 0x02;
-
   //
   //  period 1 second
   //
@@ -628,6 +622,79 @@ void average_record(record_t *src, record_t *dst, uint16_t cnt)
   }
 }
 
+void average_record_minmax(record_t *src, record_t *dst, uint16_t cnt)
+{
+  if (cnt == 0) { return; }
+  //
+  //
+  if (src->rssi != RSSI_ERROR)
+  {
+    if (dst->rssi == RSSI_ERROR)
+    {
+      dst->rssi = src->rssi;
+      dst->rssi_min = src->rssi_min;
+      dst->rssi_max = src->rssi_max;
+    }
+    else
+    {
+      dst->rssi = (dst->rssi*(cnt-1) + src->rssi) / cnt;
+      if (dst->rssi_min > src->rssi_min) { dst->rssi_min = src->rssi_min; }
+      if (dst->rssi_max < src->rssi_max) { dst->rssi_max = src->rssi_max; }
+    }
+  }
+  //
+  //
+  if (src->vbat != VBAT_ERROR)
+  {
+    if (dst->vbat == VBAT_ERROR)
+    {
+      dst->vbat = src->vbat;
+      dst->vbat_min = src->vbat_min;
+      dst->vbat_max = src->vbat_max;
+    }
+    else
+    {
+      dst->vbat = (dst->vbat*(cnt-1) + src->vbat) / cnt;
+      if (dst->vbat_min > src->vbat_min) { dst->vbat_min = src->vbat_min; }
+      if (dst->vbat_max < src->vbat_max) { dst->vbat_max = src->vbat_max; }
+    }
+  }
+  //
+  //
+  if (src->t1 != DALLAS_TEMPERATURE_ERROR)
+  {
+    if (dst->t1 == DALLAS_TEMPERATURE_ERROR)
+    {
+      dst->t1 = src->t1;
+      dst->t1_min = src->t1_min;
+      dst->t1_max = src->t1_max;
+    }
+    else
+    {
+      dst->t1 = (dst->t1*(cnt-1) + src->t1) / cnt;
+      if (dst->t1_min > src->t1_min) { dst->t1_min = src->t1_min; }
+      if (dst->t1_max < src->t1_max) { dst->t1_max = src->t1_max; }
+    }
+  }
+  //
+  //
+  if (src->t2 != DALLAS_TEMPERATURE_ERROR)
+  {
+    if (dst->t2 == DALLAS_TEMPERATURE_ERROR)
+    {
+      dst->t2 = src->t2;
+      dst->t2_min = src->t2_min;
+      dst->t2_max = src->t2_max;
+    }
+    else
+    {
+      dst->t2 = (dst->t2*(cnt-1) + src->t2) / cnt;
+      if (dst->t2_min > src->t2_min) { dst->t2_min = src->t2_min; }
+      if (dst->t2_max < src->t2_max) { dst->t2_max = src->t2_max; }
+    }
+  }
+}
+
 String time_to_string(time_t time)
 {
   String result;
@@ -679,6 +746,21 @@ String time_to_time(time_t time)
   return result;
 }
 
+time_t time_to_ymdh(time_t time)
+{
+  time_t result;
+
+  struct tm * info = localtime ( &time );
+
+  info->tm_min = 0;
+  info->tm_sec = 0;
+
+  result = mktime( info );
+
+  return result;
+}
+
+
 /*
 //////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////
@@ -707,6 +789,7 @@ void WebServer_setup()
   server.on("/records1m", handle_records1m);
   server.on("/records1mf", handle_records1mf);
   server.on("/records10mf", handle_records10mf);
+  server.on("/records10mf_simple", handle_records10mf_simple);
   server.on("/records1hf", handle_records1hf);
 
   server.onNotFound(handleNotFound);
@@ -795,6 +878,8 @@ void handle_menu()
       message += F("<a href=\"/records1m\" target=\"content\">[Память 1мин]</a>&nbsp");
       message += F("<a href=\"/records1mf\" target=\"content\">[Накопитель 1мин]</a>&nbsp");
       message += F("<a href=\"/records10mf\" target=\"content\">[Накопитель 10мин]</a>&nbsp");
+      message += F("<a href=\"/records10mf_simple\" target=\"content\">[Накопитель 10мин упрощенно]</a>&nbsp");
+      message += F("<br>");
       message += F("<a href=\"/records1hf\" target=\"content\">[Накопитель 1час]</a>&nbsp");
 
       message += F("<br>Наработано секунд: "); message += record_1s.uptime;
@@ -1446,10 +1531,10 @@ void handle_records10mf()
 }
 
 
-void handle_records1hf()
+void handle_records10mf_simple()
 {
   //LED_ON
-  Serial.printf("\r\nvoid handle_records10mf()");
+  Serial.printf("\r\nvoid handle_records10mf_simple()");
   int time_make = millis();
 
   String message;
@@ -1465,7 +1550,7 @@ void handle_records1hf()
       message += F("<br>Текущее время: "); message += time_to_string(time_unix);
       message += F("<p>");
 
-      message += F("<h1>Записи с периодом 1 час</h1>");
+      message += F("<h1>Записи с периодом 10 минут в упрощенном виде</h1>");
 
       message += F("<p>");
 
@@ -1473,10 +1558,10 @@ void handle_records1hf()
       message += F(
         "<table cellpadding='0' cellspacing='0' width='90%'"
         " border=1 style='border-collapse:collapse;'"
-		" bordercolor= "
-		">");
+    " bordercolor= "
+    ">");
       message += F("<caption>");
-        message += F("Записи с периодом 1 час");
+        message += F("Записи с периодом 10 минут в упрощенном виде");
       message += F("</caption>");
       message += F("<thead>");
         message += F("<tr>");
@@ -1505,18 +1590,18 @@ void handle_records1hf()
           TD( time_to_date(rec.time_unix) );
           TD( time_to_time(rec.time_unix) );
           message += F("<td>");
-			message += rec.t1_min;
-			message += F(" ... ");
-			message += rec.t1;
-			message += F(" ... ");
-			message += rec.t1_max;
+      message += rec.t1_min;
+      message += F(" ... ");
+      message += rec.t1;
+      message += F(" ... ");
+      message += rec.t1_max;
           message += F("</td>");
           message += F("<td>");
-			message += rec.t2_min;
-			message += F(" ... ");
-			message += rec.t2;
-			message += F(" ... ");
-			message += rec.t2_max;
+      message += rec.t2_min;
+      message += F(" ... ");
+      message += rec.t2;
+      message += F(" ... ");
+      message += rec.t2_max;
           message += F("</td>");
         message += F("</tr>");
 
@@ -1547,75 +1632,164 @@ void handle_records1hf()
     );
 }
 
-
-/*
-//////////////////////////////////////////////////////////
-////////////    //////////////////////////////////////////////
-
-        .oooooo.   ooooooooooooo       .o.
-       d8P'  `Y8b  8'   888   `8      .888.
-      888      888      888          .8"888.
-      888      888      888         .8' `888.
-      888      888      888        .88ooo8888.
-      `88b    d88'      888       .8'     `888.
-       `Y8bood8P'      o888o     o88o     o8888o
-
-//////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////
-*/
-void ArduinoOTA_setup()
+void handle_records1hf()
 {
+  //LED_ON
+  Serial.printf("\r\nvoid handle_records1hf()");
+  int time_make = millis();
 
-  // Port defaults to 8266
-  ArduinoOTA.setPort(8266);
+  String message;
+  message += F("<html>");
 
-  // Hostname defaults to esp8266-[ChipID]
-  ArduinoOTA.setHostname(_hostname);
+    message += F("<head>");
+      message += F("<meta http-equiv='refresh' content='600'/>");
+      message += F("<meta charset=\"utf-8\">");
+      message += F("<title>"); message += _hostname; message += F("</title>");
+    message += F("</head>");
 
-  // No authentication by default
-  ArduinoOTA.setPassword(_password);
+    message += F("<body>");
+      message += F("<br>Текущее время: "); message += time_to_string(time_unix);
+      message += F("<p>");
 
-  // Password can be set with it's md5 value as well
-  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
-  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
+      message += F("<h1>Записи с периодом 1 час</h1>");
 
-  ArduinoOTA.onStart([]() {
-    String type;
-    if (ArduinoOTA.getCommand() == U_FLASH) {
-      type = "sketch";
-    } else { // U_SPIFFS
-      type = "filesystem";
+      message += F("<p>");
+
+
+      message += F(
+        "<table cellpadding='0' cellspacing='0' width='90%'"
+        " border=1 style='border-collapse:collapse;'"
+		" bordercolor= "
+		">");
+      message += F("<caption>");
+        message += F("Записи с периодом 1 час");
+      message += F("</caption>");
+      message += F("<thead>");
+        message += handle_records1hf_print_table_hdr();
+      message += F("</thead>");
+
+      message += F("<tbody>");
+
+    record_t rec;
+    record_t rec_ave;
+    set_record_to_default(&rec);
+    set_record_to_default(&rec_ave);
+    time_t ymdh_curr, ymdh_new;
+    int first = 1;
+
+    ymdh_new = 0; ymdh_curr = 0;
+
+    File f10m = SPIFFS.open(record_10m_filename, "r");
+
+    if (f10m)
+    {
+      int32_t pos = f10m.size();
+      int count = 48; // 48 hours
+      pos -= sizeof(rec);
+      while ( (pos >= 0) && (count > 0) )
+      {
+        f10m.seek(pos, SeekSet);
+        f10m.read((uint8_t*)&rec, sizeof(rec));
+
+        pos -= sizeof(record_t);
+        count--;
+
+        ymdh_new = time_to_ymdh(rec.time_unix);
+
+        if ((ymdh_new != ymdh_curr) && (first == 0))
+        {
+          if (ymdh_curr != 0)
+          {
+            rec_ave.time_unix = ymdh_curr;
+            message += handle_records1hf_print_table_row(rec_ave);
+          }
+
+          ymdh_curr = ymdh_new;
+          first = 1;
+          continue;
+        }
+
+        if (first == 0)
+        {
+          average_record_minmax(&rec, &rec_ave, 2);
+        }
+
+        if (first == 1)
+        {
+          first = 0;
+
+          rec_ave = rec;
+          ymdh_curr = ymdh_new;
+
+          if (!( (pos >= 0) && (count > 0) ))
+          {
+            message += handle_records1hf_print_table_row(rec_ave);
+          }
+        }
+
+      }
+
+      f10m.close();
     }
-    Serial.println("\r\nUnmounting filesystem...");
-    SPIFFS.end();
-    // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-    Serial.println("\r\nStart updating " + type);
-  });
 
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\r\nEnd");
-  });
+      message += F("</tbody>");
+      message += F("</table>");
 
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%% rssi=%i\r", (progress / (total / 100)), WiFi.RSSI());
-  });
+    message += F("</body>");
+  message += F("</html>");
 
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) {
-      Serial.println("Auth Failed");
-    } else if (error == OTA_BEGIN_ERROR) {
-      Serial.println("Begin Failed");
-    } else if (error == OTA_CONNECT_ERROR) {
-      Serial.println("Connect Failed");
-    } else if (error == OTA_RECEIVE_ERROR) {
-      Serial.println("Receive Failed");
-    } else if (error == OTA_END_ERROR) {
-      Serial.println("End Failed");
-    }
-  });
+  time_make = millis() - time_make;
+  int time_send = millis();
+  server.send(200, "text/html", message);
+  time_send = millis() - time_send;
 
-  ArduinoOTA.begin();
-  Serial.print("\r\nArduinoOTA started");
-
+  //LED_OFF
+  Serial.printf("\tmake=% 5dms send=% 5dms, length=% 5d",
+    time_make,
+    time_send,
+    message.length()
+    );
 }
+
+String handle_records1hf_print_table_hdr()
+{
+  String message;
+  message += F("<tr>");
+    message += F("<th>Дата</th>");
+    message += F("<th>Время</th>");
+    message += F("<th>T1</th>");
+    message += F("<th>T2</th>");
+  message += F("</tr>");
+  return message;
+}
+
+String handle_records1hf_print_table_row(record_t rec)
+{
+  String message;
+#define TD(x) { message += F("<td>"); message += (x); message += F("</td>"); }
+
+  message += F("<tr align=\"center\">");
+    TD( time_to_date(rec.time_unix) );
+    TD( time_to_time(rec.time_unix) );
+    message += F("<td>");
+      message += rec.t1_min;
+      message += F(" ... ");
+      message += rec.t1;
+      message += F(" ... ");
+      message += rec.t1_max;
+    message += F("</td>");
+    message += F("<td>");
+      message += rec.t2_min;
+      message += F(" ... ");
+      message += rec.t2;
+      message += F(" ... ");
+      message += rec.t2_max;
+    message += F("</td>");
+  message += F("</tr>");
+
+#undef TD
+
+  return message;
+}
+
+
